@@ -10,12 +10,15 @@ import pandas as pd
 from io import StringIO
 from flask import Flask, jsonify, render_template
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)s] %(message)s',
     handlers=[logging.StreamHandler(sys.stdout)]
 )
+logging.getLogger('urllib3').setLevel(logging.WARNING)
 log = logging.getLogger(__name__)
 
 app = Flask(__name__)
@@ -61,14 +64,25 @@ SUGGESTIONS_CACHE_TTL = 300  # 5 minutes
 
 NSE_HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+    'Accept-Language': 'en-US,en;q=0.5',
+    'Accept-Encoding': 'gzip, deflate',
+    'Connection': 'keep-alive',
 }
 
 YAHOO_HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
 }
 
+_nse_session = requests.Session()
+_nse_session.headers.update(NSE_HEADERS)
+_nse_retry = Retry(total=2, backoff_factor=1, status_forcelist=[429, 500, 502, 503, 504])
+_nse_session.mount('https://', HTTPAdapter(max_retries=_nse_retry, pool_connections=10, pool_maxsize=10))
+
 _http_session = requests.Session()
 _http_session.headers.update(YAHOO_HEADERS)
+_yahoo_retry = Retry(total=2, backoff_factor=0.5, status_forcelist=[429, 500, 502, 503, 504])
+_http_session.mount('https://', HTTPAdapter(max_retries=_yahoo_retry, pool_connections=30, pool_maxsize=30))
 
 _data_cache = []
 _data_status = "idle"
@@ -76,8 +90,42 @@ _data_total = 0
 _data_done = 0
 _lock = threading.Lock()
 
-# Rate limiter for Yahoo Finance API
-_yahoo_semaphore = threading.Semaphore(15)
+_yahoo_semaphore = threading.Semaphore(10)
+
+FALLBACK_NIFTY50 = [
+    "ADANIPORTS", "APOLLOHOSP", "ASIANPAINT", "AXISBANK", "BAJAJ-AUTO",
+    "BAJFINANCE", "BAJAJFINSV", "BPCL", "BRITANNIA", "CIPLA",
+    "COALINDIA", "DRREDDY", "EICHERMOT", "GRASIM", "HCLTECH",
+    "HDFCBANK", "HDFCLIFE", "HEROMOTOCO", "HINDALCO", "HINDUNILVR",
+    "ICICIBANK", "INFY", "ITC", "KOTAKBANK", "LT",
+    "M&M", "MARUTI", "NESTLEIND", "NTPC", "ONGC",
+    "POWERGRID", "RELIANCE", "SBIN", "SUNPHARMA", "TATACONSUM",
+    "TATAMOTORS", "TATASTEEL", "TCS", "TECHM", "TITAN",
+    "ULTRACEMCO", "WIPRO", "BAJAJFINSV", "HINDUNILVR", "ITC",
+    "SBILIFE", "HDFCLIFE", "TRENT", "ADANIENT", "BEL",
+]
+
+FALLBACK_NIFTY100 = FALLBACK_NIFTY50 + [
+    "ABB", "ABCAPITAL", "ABFRL", "ACC", "ALKEM",
+    "AMBUJACEM", "APLAPOLLO", "ASHOKLEY", "ASTRAL", "AUBANK",
+    "AUROPHARMA", "BALKRISIND", "BANDHANBNK", "BANKBARODA", "BHARATFORG",
+    "BHARTIARTL", "BIOCON", "BOSCHLTD", "CANBK", "CHOLAFIN",
+    "COFORGE", "COLPAL", "CONCOR", "CROMPTON", "CUMMINSIND",
+    "DABUR", "DALBHARAT", "DEEPAKNTR", "DIVISLAB", "DIXON",
+    "DLF", "ELGIEQUIP", "ESCORTS", "EXIDEIND", "FEDERALBNK",
+    "GLENMARK", "GODREJCP", "GODREJIND", "GSFC", "HAL",
+    "HAVELLS", "IDFCFIRSTB", "INDHOTEL", "INDUSINDBK", "IOC",
+    "IRCTC", "JUBLFOOD", "KAJARIACER", "LALPATHLAB", "LICHSGFIN",
+    "LUPIN", "MANAPPURAM", "MARICO", "MFSL", "MGL",
+    "MOTHERSON", "MPHASIS", "MUTHOOTFIN", "NATIONALUM", "OBEROIRLTY",
+    "OIL", "PAGEIND", "PERSISTENT", "PETRONET", "PIDILITIND",
+    "PIIND", "PNB", "POLYCAB", "PVRINOX", "RAMCOCEM",
+    "RBLBANK", "RECLTD", "SAIL", "SBICARD", "SHREECEM",
+    "SHRIRAMFIN", "SIEMENS", "SRF", "SUNTV", "TATACHEM",
+    "TATACOMM", "TATAELXSI", "TATAPOWER", "TORNTPHARM", "TRIDENT",
+    "TVSMOTOR", "UBL", "UCO", "UPL", "VEDL",
+    "VOLTAS", "ZEEL", "ZYDUSLIFE", "ALKEM", "AUROPHARMA",
+]
 
 
 def get_all_nse_symbols():
@@ -93,7 +141,7 @@ def get_all_nse_symbols():
 
     log.info("Attempting to fetch NSE equity list from archives...")
     try:
-        resp = requests.get(NSE_EQUITY_CSV, headers=NSE_HEADERS, timeout=20)
+        resp = _nse_session.get(NSE_EQUITY_CSV, timeout=10)
         if resp.status_code == 200:
             df = pd.read_csv(StringIO(resp.text))
             stocks = []
@@ -113,12 +161,15 @@ def get_all_nse_symbols():
 
     log.info("Using fallback NSE stock list")
     stocks = [{'symbol': s, 'name': s} for s in FALLBACK_NSE_SYMBOLS]
-    with open(STOCKS_CACHE_FILE, 'w') as f:
-        json.dump(stocks, f)
+    try:
+        with open(STOCKS_CACHE_FILE, 'w') as f:
+            json.dump(stocks, f)
+    except Exception:
+        pass
     return stocks
 
 
-def fetch_index_symbols(index_name, csv_url, cache_file):
+def fetch_index_symbols(index_name, csv_url, cache_file, fallback=None):
     if os.path.exists(cache_file):
         try:
             with open(cache_file) as f:
@@ -131,7 +182,7 @@ def fetch_index_symbols(index_name, csv_url, cache_file):
 
     log.info(f"Fetching {index_name} symbols from NSE...")
     try:
-        resp = requests.get(csv_url, headers=NSE_HEADERS, timeout=20)
+        resp = _nse_session.get(csv_url, timeout=10)
         if resp.status_code == 200:
             df = pd.read_csv(StringIO(resp.text))
             symbols = []
@@ -141,22 +192,29 @@ def fetch_index_symbols(index_name, csv_url, cache_file):
                     symbols.append(symbol)
             if symbols:
                 log.info(f"Fetched {len(symbols)} {index_name} symbols")
-                with open(cache_file, 'w') as f:
-                    json.dump(symbols, f)
+                try:
+                    with open(cache_file, 'w') as f:
+                        json.dump(symbols, f)
+                except Exception:
+                    pass
                 return set(symbols)
         log.warning(f"{index_name} CSV returned status {resp.status_code}")
     except Exception as e:
         log.warning(f"{index_name} CSV fetch failed: {e}")
 
+    if fallback:
+        log.info(f"Using fallback {index_name} list ({len(fallback)} symbols)")
+        return set(fallback)
+
     return set()
 
 
 def get_nifty50_symbols():
-    return fetch_index_symbols("NIFTY 50", NIFTY_50_CSV, NIFTY50_CACHE_FILE)
+    return fetch_index_symbols("NIFTY 50", NIFTY_50_CSV, NIFTY50_CACHE_FILE, fallback=FALLBACK_NIFTY50)
 
 
 def get_nifty100_symbols():
-    return fetch_index_symbols("NIFTY 100", NIFTY_100_CSV, NIFTY100_CACHE_FILE)
+    return fetch_index_symbols("NIFTY 100", NIFTY_100_CSV, NIFTY100_CACHE_FILE, fallback=FALLBACK_NIFTY100)
 
 
 def compute_ema(data, period):
@@ -442,11 +500,16 @@ def fetch_yahoo_stock(symbol):
     params = {'interval': '1d', 'range': '1y'}
     with _yahoo_semaphore:
         try:
-            r = _http_session.get(url, params=params, timeout=15)
+            r = _http_session.get(url, params=params, timeout=12)
             if r.status_code == 200:
                 data = r.json()
-                result = data['chart']['result'][0]
-                meta = result['meta']
+                chart = data.get('chart', {})
+                result_list = chart.get('result', [])
+                if not result_list:
+                    log.debug(f"Yahoo: no result for {symbol}")
+                    return None
+                result = result_list[0]
+                meta = result.get('meta', {})
                 price = meta.get('regularMarketPrice', 0)
                 high52 = meta.get('fiftyTwoWeekHigh', 0)
                 name = meta.get('shortName', '') or meta.get('longName', '')
@@ -461,6 +524,15 @@ def fetch_yahoo_stock(symbol):
                         'drawdown': round(dd, 2),
                         'volume': int(vol) if vol else 0,
                     }
+            elif r.status_code == 429:
+                log.warning(f"Yahoo rate-limited for {symbol}, sleeping...")
+                time.sleep(2)
+            else:
+                log.debug(f"Yahoo returned {r.status_code} for {symbol}")
+        except requests.exceptions.Timeout:
+            log.debug(f"Yahoo timeout for {symbol}")
+        except requests.exceptions.ConnectionError:
+            log.debug(f"Yahoo connection error for {symbol}")
         except Exception as e:
             log.debug(f"Yahoo fetch failed for {symbol}: {e}")
     return None
@@ -513,12 +585,16 @@ def fetch_stock_with_ohlcv(symbol):
     params = {'interval': '1d', 'range': '1y'}
     with _yahoo_semaphore:
         try:
-            r = _http_session.get(url, params=params, timeout=15)
+            r = _http_session.get(url, params=params, timeout=12)
             if r.status_code == 200:
                 data = r.json()
-                result = data['chart']['result'][0]
-                meta = result['meta']
-                quotes = result['indicators']['quote'][0]
+                chart = data.get('chart', {})
+                result_list = chart.get('result', [])
+                if not result_list:
+                    return None
+                result = result_list[0]
+                meta = result.get('meta', {})
+                quotes = result.get('indicators', {}).get('quote', [{}])[0]
                 price = meta.get('regularMarketPrice', 0)
                 high52 = meta.get('fiftyTwoWeekHigh', 0)
                 name = meta.get('shortName', '') or meta.get('longName', '')
@@ -541,7 +617,9 @@ def fetch_stock_with_ohlcv(symbol):
                         'lows': lows,
                         'volumes': volumes,
                     }
-        except:
+            elif r.status_code == 429:
+                time.sleep(2)
+        except Exception:
             pass
     return None
 
@@ -587,13 +665,16 @@ def background_suggestions():
         log.info(f"Computing suggestions for {len(symbols_data)} stocks...")
 
         results = []
-        with ThreadPoolExecutor(max_workers=15) as ex:
+        with ThreadPoolExecutor(max_workers=10) as ex:
             futures = {ex.submit(fetch_stock_with_ohlcv, s['symbol']): s for s in symbols_data}
             for f in as_completed(futures):
                 stock_info = futures[f]
                 with _suggestions_lock:
                     _suggestions_done += 1
-                data = f.result()
+                try:
+                    data = f.result(timeout=20)
+                except Exception:
+                    data = None
                 if data and len(data.get('closes', [])) >= 20:
                     score_result = compute_buy_score(data)
                     hist_metrics = compute_historical_metrics(data['closes'], data.get('highs', []))
@@ -644,20 +725,23 @@ def background_refresh():
                 _data_status = "done"
             return
 
-        nifty50 = get_nifty50_symbols()
-        nifty100 = get_nifty100_symbols()
-        log.info(f"Loaded index data: NIFTY50={len(nifty50)}, NIFTY100={len(nifty100)}")
-
         with _lock:
             _data_total = len(symbols)
             _data_done = 0
 
+        nifty50 = get_nifty50_symbols()
+        nifty100 = get_nifty100_symbols()
+        log.info(f"Loaded index data: NIFTY50={len(nifty50)}, NIFTY100={len(nifty100)}")
+
         results = []
         failed_count = 0
-        with ThreadPoolExecutor(max_workers=20) as ex:
+        with ThreadPoolExecutor(max_workers=15) as ex:
             futures = {ex.submit(fetch_yahoo_stock, s): s for s in symbols}
             for f in as_completed(futures):
-                r = f.result()
+                try:
+                    r = f.result(timeout=20)
+                except Exception:
+                    r = None
                 with _lock:
                     _data_done += 1
                 if r:
@@ -672,7 +756,7 @@ def background_refresh():
                     failed_count += 1
 
                 done = _data_done
-                if done % 50 == 0 or done == _data_total:
+                if done % 100 == 0 or done == _data_total:
                     log.info(f"Progress: {done}/{_data_total} scanned, {len(results)} matched, {failed_count} failed")
 
         results = [s for s in results if s.get('drawdown', 0) >= 25]
@@ -731,6 +815,21 @@ def api_status():
             'done': _data_done,
             'results': len(_data_cache),
         })
+
+
+@app.route('/api/debug')
+def api_debug():
+    return jsonify({
+        'status': _data_status,
+        'total': _data_total,
+        'done': _data_done,
+        'cache_size': len(_data_cache),
+        'has_stocks_cache': os.path.exists(STOCKS_CACHE_FILE),
+        'has_data_cache': os.path.exists(DATA_CACHE_FILE),
+        'has_nifty50_cache': os.path.exists(NIFTY50_CACHE_FILE),
+        'has_nifty100_cache': os.path.exists(NIFTY100_CACHE_FILE),
+        'suggestions_status': _suggestions_status,
+    })
 
 
 @app.route('/api/stock/<symbol>')
