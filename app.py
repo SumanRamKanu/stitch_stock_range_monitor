@@ -76,8 +76,6 @@ YAHOO_HEADERS = {
 
 _nse_session = requests.Session()
 _nse_session.headers.update(NSE_HEADERS)
-_nse_retry = Retry(total=2, backoff_factor=1, status_forcelist=[429, 500, 502, 503, 504])
-_nse_session.mount('https://', HTTPAdapter(max_retries=_nse_retry, pool_connections=10, pool_maxsize=10))
 
 _http_session = requests.Session()
 _http_session.headers.update(YAHOO_HEADERS)
@@ -141,7 +139,7 @@ def get_all_nse_symbols():
 
     log.info("Attempting to fetch NSE equity list from archives...")
     try:
-        resp = _nse_session.get(NSE_EQUITY_CSV, timeout=10)
+        resp = _nse_session.get(NSE_EQUITY_CSV, timeout=(3, 5))
         if resp.status_code == 200:
             df = pd.read_csv(StringIO(resp.text))
             stocks = []
@@ -152,10 +150,17 @@ def get_all_nse_symbols():
                     stocks.append({'symbol': symbol, 'name': name})
             if stocks:
                 log.info(f"Fetched {len(stocks)} symbols from NSE archives")
-                with open(STOCKS_CACHE_FILE, 'w') as f:
-                    json.dump(stocks, f)
+                try:
+                    with open(STOCKS_CACHE_FILE, 'w') as f:
+                        json.dump(stocks, f)
+                except Exception:
+                    pass
                 return stocks
         log.warning(f"NSE archives returned status {resp.status_code}")
+    except requests.exceptions.Timeout:
+        log.warning("NSE archives timed out, using fallback list")
+    except requests.exceptions.ConnectionError:
+        log.warning("NSE archives connection failed, using fallback list")
     except Exception as e:
         log.warning(f"NSE CSV fetch failed: {e}")
 
@@ -182,7 +187,7 @@ def fetch_index_symbols(index_name, csv_url, cache_file, fallback=None):
 
     log.info(f"Fetching {index_name} symbols from NSE...")
     try:
-        resp = _nse_session.get(csv_url, timeout=10)
+        resp = _nse_session.get(csv_url, timeout=(3, 5))
         if resp.status_code == 200:
             df = pd.read_csv(StringIO(resp.text))
             symbols = []
@@ -199,6 +204,10 @@ def fetch_index_symbols(index_name, csv_url, cache_file, fallback=None):
                     pass
                 return set(symbols)
         log.warning(f"{index_name} CSV returned status {resp.status_code}")
+    except requests.exceptions.Timeout:
+        log.warning(f"{index_name} CSV timed out")
+    except requests.exceptions.ConnectionError:
+        log.warning(f"{index_name} CSV connection failed")
     except Exception as e:
         log.warning(f"{index_name} CSV fetch failed: {e}")
 
@@ -720,14 +729,14 @@ def background_refresh():
         log.info(f"Got {len(symbols)} NSE symbols to scan")
 
         if not symbols:
-            log.error("No symbols to scan! Check NSE connectivity.")
-            with _lock:
-                _data_status = "done"
-            return
+            log.error("No symbols to scan! Using fallback list.")
+            stocks = [{'symbol': s, 'name': s} for s in FALLBACK_NSE_SYMBOLS]
+            symbols = [s['symbol'] for s in stocks]
 
         with _lock:
             _data_total = len(symbols)
             _data_done = 0
+        log.info(f"Total symbols to scan: {_data_total}")
 
         nifty50 = get_nifty50_symbols()
         nifty100 = get_nifty100_symbols()
