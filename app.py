@@ -730,21 +730,30 @@ def background_refresh():
     try:
         with _lock:
             _data_status = "fetching"
+        print("[REFRESH] Step 1: status set to fetching", flush=True)
 
-        safe_log("info", "Starting background refresh...")
+        try:
+            stocks = get_all_nse_symbols()
+            print(f"[REFRESH] Step 2: got {len(stocks)} stocks from NSE", flush=True)
+        except Exception as e:
+            print(f"[REFRESH] Step 2 FAILED: {e}", flush=True)
+            stocks = [{'symbol': s, 'name': s} for s in FALLBACK_NSE_SYMBOLS]
 
-        stocks = get_all_nse_symbols()
-        symbols = [s['symbol'] for s in stocks]
-        safe_log("info", f"Got {len(symbols)} NSE symbols to scan")
+        try:
+            symbols = [s['symbol'] for s in stocks]
+            print(f"[REFRESH] Step 3: extracted {len(symbols)} symbols", flush=True)
+        except Exception as e:
+            print(f"[REFRESH] Step 3 FAILED: {e}", flush=True)
+            symbols = list(FALLBACK_NSE_SYMBOLS)
 
         if not symbols:
-            safe_log("error", "No symbols from cache, using fallback")
+            print("[REFRESH] No symbols, using fallback", flush=True)
             symbols = list(FALLBACK_NSE_SYMBOLS)
 
         with _lock:
             _data_total = len(symbols)
             _data_done = 0
-        safe_log("info", f"Total symbols to scan: {_data_total}")
+        print(f"[REFRESH] Step 4: total set to {_data_total}", flush=True)
 
         nifty50 = set()
         nifty100 = set()
