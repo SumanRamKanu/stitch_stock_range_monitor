@@ -727,51 +727,55 @@ def background_suggestions():
 def background_refresh():
     global _data_cache, _data_status, _data_total, _data_done
 
+    print('[REFRESH] THREAD STARTED', flush=True)
+
     try:
         with _lock:
             _data_status = "fetching"
-        print("[REFRESH] Step 1: status set to fetching", flush=True)
+        print('[REFRESH] status set to fetching', flush=True)
 
         try:
             stocks = get_all_nse_symbols()
-            print(f"[REFRESH] Step 2: got {len(stocks)} stocks from NSE", flush=True)
+            print(f'[REFRESH] Got {len(stocks)} stocks from NSE', flush=True)
         except Exception as e:
-            print(f"[REFRESH] Step 2 FAILED: {e}", flush=True)
+            print(f'[REFRESH] FAILED to get NSE symbols: {e}', flush=True)
+            import traceback
+            traceback.print_exc()
             stocks = [{'symbol': s, 'name': s} for s in FALLBACK_NSE_SYMBOLS]
 
         try:
             symbols = [s['symbol'] for s in stocks]
-            print(f"[REFRESH] Step 3: extracted {len(symbols)} symbols", flush=True)
+            print(f'[REFRESH] Extracted {len(symbols)} symbols', flush=True)
         except Exception as e:
-            print(f"[REFRESH] Step 3 FAILED: {e}", flush=True)
+            print(f'[REFRESH] FAILED to extract symbols: {e}', flush=True)
             symbols = list(FALLBACK_NSE_SYMBOLS)
 
         if not symbols:
-            print("[REFRESH] No symbols, using fallback", flush=True)
+            print('[REFRESH] No symbols, using fallback', flush=True)
             symbols = list(FALLBACK_NSE_SYMBOLS)
 
         with _lock:
             _data_total = len(symbols)
             _data_done = 0
-        print(f"[REFRESH] Step 4: total set to {_data_total}", flush=True)
+        print(f'[REFRESH] Total set to {_data_total}', flush=True)
 
         nifty50 = set()
         nifty100 = set()
         try:
             nifty50 = get_nifty50_symbols()
-            safe_log("info", f"Loaded {len(nifty50)} NIFTY50 symbols")
+            print(f'[REFRESH] Got {len(nifty50)} NIFTY50 symbols', flush=True)
         except Exception as e:
-            safe_log("warning", f"NIFTY50 fetch failed: {e}, using fallback")
+            print(f'[REFRESH] NIFTY50 failed: {e}', flush=True)
             nifty50 = set(FALLBACK_NIFTY50)
 
         try:
             nifty100 = get_nifty100_symbols()
-            safe_log("info", f"Loaded {len(nifty100)} NIFTY100 symbols")
+            print(f'[REFRESH] Got {len(nifty100)} NIFTY100 symbols', flush=True)
         except Exception as e:
-            safe_log("warning", f"NIFTY100 fetch failed: {e}, using fallback")
+            print(f'[REFRESH] NIFTY100 failed: {e}', flush=True)
             nifty100 = set(FALLBACK_NIFTY100)
 
-        safe_log("info", f"Index data: NIFTY50={len(nifty50)}, NIFTY100={len(nifty100)}")
+        print(f'[REFRESH] Indexes loaded: NIFTY50={len(nifty50)}, NIFTY100={len(nifty100)}', flush=True)
 
         results = []
         failed_count = 0
