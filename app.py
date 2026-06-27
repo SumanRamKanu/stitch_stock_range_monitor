@@ -67,11 +67,17 @@ YAHOO_HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
 }
 
+_http_session = requests.Session()
+_http_session.headers.update(YAHOO_HEADERS)
+
 _data_cache = []
 _data_status = "idle"
 _data_total = 0
 _data_done = 0
 _lock = threading.Lock()
+
+# Rate limiter for Yahoo Finance API
+_yahoo_semaphore = threading.Semaphore(15)
 
 
 def get_all_nse_symbols():
@@ -434,28 +440,29 @@ def compute_historical_metrics(closes, highs, timestamps=None):
 def fetch_yahoo_stock(symbol):
     url = f'https://query1.finance.yahoo.com/v8/finance/chart/{symbol}.NS'
     params = {'interval': '1d', 'range': '1y'}
-    try:
-        r = requests.get(url, params=params, headers=YAHOO_HEADERS, timeout=15)
-        if r.status_code == 200:
-            data = r.json()
-            result = data['chart']['result'][0]
-            meta = result['meta']
-            price = meta.get('regularMarketPrice', 0)
-            high52 = meta.get('fiftyTwoWeekHigh', 0)
-            name = meta.get('shortName', '') or meta.get('longName', '')
-            vol = meta.get('regularMarketVolume', 0)
-            if high52 and price and high52 > 0:
-                dd = ((high52 - price) / high52) * 100
-                return {
-                    'symbol': symbol,
-                    'name': name or '',
-                    'currentPrice': round(float(price), 2),
-                    'high52w': round(float(high52), 2),
-                    'drawdown': round(dd, 2),
-                    'volume': int(vol) if vol else 0,
-                }
-    except Exception as e:
-        log.debug(f"Yahoo fetch failed for {symbol}: {e}")
+    with _yahoo_semaphore:
+        try:
+            r = _http_session.get(url, params=params, timeout=15)
+            if r.status_code == 200:
+                data = r.json()
+                result = data['chart']['result'][0]
+                meta = result['meta']
+                price = meta.get('regularMarketPrice', 0)
+                high52 = meta.get('fiftyTwoWeekHigh', 0)
+                name = meta.get('shortName', '') or meta.get('longName', '')
+                vol = meta.get('regularMarketVolume', 0)
+                if high52 and price and high52 > 0:
+                    dd = ((high52 - price) / high52) * 100
+                    return {
+                        'symbol': symbol,
+                        'name': name or '',
+                        'currentPrice': round(float(price), 2),
+                        'high52w': round(float(high52), 2),
+                        'drawdown': round(dd, 2),
+                        'volume': int(vol) if vol else 0,
+                    }
+        except Exception as e:
+            log.debug(f"Yahoo fetch failed for {symbol}: {e}")
     return None
 
 
@@ -504,37 +511,38 @@ def save_suggestions_cache(results):
 def fetch_stock_with_ohlcv(symbol):
     url = f'https://query1.finance.yahoo.com/v8/finance/chart/{symbol}.NS'
     params = {'interval': '1d', 'range': '1y'}
-    try:
-        r = requests.get(url, params=params, headers=YAHOO_HEADERS, timeout=15)
-        if r.status_code == 200:
-            data = r.json()
-            result = data['chart']['result'][0]
-            meta = result['meta']
-            quotes = result['indicators']['quote'][0]
-            price = meta.get('regularMarketPrice', 0)
-            high52 = meta.get('fiftyTwoWeekHigh', 0)
-            name = meta.get('shortName', '') or meta.get('longName', '')
-            vol = meta.get('regularMarketVolume', 0)
-            if high52 and price and high52 > 0:
-                dd = ((high52 - price) / high52) * 100
-                closes = [c for c in quotes.get('close', []) if c is not None]
-                highs = [h for h in quotes.get('high', []) if h is not None]
-                lows = [l for l in quotes.get('low', []) if l is not None]
-                volumes = [v for v in quotes.get('volume', []) if v is not None]
-                return {
-                    'symbol': symbol,
-                    'name': name or '',
-                    'currentPrice': round(float(price), 2),
-                    'high52w': round(float(high52), 2),
-                    'drawdown': round(dd, 2),
-                    'volume': int(vol) if vol else 0,
-                    'closes': closes,
-                    'highs': highs,
-                    'lows': lows,
-                    'volumes': volumes,
-                }
-    except:
-        pass
+    with _yahoo_semaphore:
+        try:
+            r = _http_session.get(url, params=params, timeout=15)
+            if r.status_code == 200:
+                data = r.json()
+                result = data['chart']['result'][0]
+                meta = result['meta']
+                quotes = result['indicators']['quote'][0]
+                price = meta.get('regularMarketPrice', 0)
+                high52 = meta.get('fiftyTwoWeekHigh', 0)
+                name = meta.get('shortName', '') or meta.get('longName', '')
+                vol = meta.get('regularMarketVolume', 0)
+                if high52 and price and high52 > 0:
+                    dd = ((high52 - price) / high52) * 100
+                    closes = [c for c in quotes.get('close', []) if c is not None]
+                    highs = [h for h in quotes.get('high', []) if h is not None]
+                    lows = [l for l in quotes.get('low', []) if l is not None]
+                    volumes = [v for v in quotes.get('volume', []) if v is not None]
+                    return {
+                        'symbol': symbol,
+                        'name': name or '',
+                        'currentPrice': round(float(price), 2),
+                        'high52w': round(float(high52), 2),
+                        'drawdown': round(dd, 2),
+                        'volume': int(vol) if vol else 0,
+                        'closes': closes,
+                        'highs': highs,
+                        'lows': lows,
+                        'volumes': volumes,
+                    }
+        except:
+            pass
     return None
 
 
@@ -579,7 +587,7 @@ def background_suggestions():
         log.info(f"Computing suggestions for {len(symbols_data)} stocks...")
 
         results = []
-        with ThreadPoolExecutor(max_workers=30) as ex:
+        with ThreadPoolExecutor(max_workers=15) as ex:
             futures = {ex.submit(fetch_stock_with_ohlcv, s['symbol']): s for s in symbols_data}
             for f in as_completed(futures):
                 stock_info = futures[f]
@@ -646,7 +654,7 @@ def background_refresh():
 
         results = []
         failed_count = 0
-        with ThreadPoolExecutor(max_workers=50) as ex:
+        with ThreadPoolExecutor(max_workers=20) as ex:
             futures = {ex.submit(fetch_yahoo_stock, s): s for s in symbols}
             for f in as_completed(futures):
                 r = f.result()
@@ -731,7 +739,7 @@ def api_stock_detail(symbol):
     url = f'https://query1.finance.yahoo.com/v8/finance/chart/{symbol}.NS'
     params = {'interval': '1d', 'range': '1y'}
     try:
-        r = requests.get(url, params=params, headers=YAHOO_HEADERS, timeout=15)
+        r = _http_session.get(url, params=params, timeout=15)
         if r.status_code != 200:
             return jsonify({'error': 'Stock not found'}), 404
 
