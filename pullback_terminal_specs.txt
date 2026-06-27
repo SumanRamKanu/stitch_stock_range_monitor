@@ -1,0 +1,15 @@
+# Deep Pullback Terminal - Product Requirements
+
+## Core Focus
+A specialized stock monitoring platform for identifying and analyzing equities trading at a significant discount (25%+) from their 52-week high levels.
+
+## Key Screens
+1. **Pullback Discovery Dashboard**: High-level overview of market sectors experiencing the deepest pullbacks, top 10 "Value Opportunities" (stocks down >25%), and market breadth indicators.
+2. **The -25% Screener**: A powerful table-based view with custom columns for "Distance from High," "Days since High," and "Volume on Dip." Pre-filtered to show only symbols with a >=25% pullback.
+3. **Symbol Analysis (Recovery View)**: A detailed look at a single stock (e.g., PYPL or TSLA) showing its 52-week peak, the trajectory of its decline, and fundamental support levels.
+4. **Recovery Watchlist**: A space for users to save "fallen angels" and set alerts for when they begin to regain momentum (e.g., breaking the 20-day SMA).
+
+## Design Constraints
+- High-density data layout.
+- Clear visual differentiation between "Deep Pullback" (Red/Coral) and "Recovery Momentum" (Blue/Green).
+- Professional terminal aesthetic.

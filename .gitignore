@@ -1,0 +1,10 @@
+venv/
+__pycache__/
+*.pyc
+*.pyo
+app.log
+stocks_cache.json
+data_cache.json
+nifty50_cache.json
+nifty100_cache.json
+suggestions_cache.json
