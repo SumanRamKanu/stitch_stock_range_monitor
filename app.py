@@ -1,7 +1,9 @@
 import os
+import sys
 import json
 import time
 import math
+import logging
 import threading
 import requests
 import pandas as pd
@@ -9,11 +11,47 @@ from io import StringIO
 from flask import Flask, jsonify, render_template
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    handlers=[logging.StreamHandler(sys.stdout)]
+)
+log = logging.getLogger(__name__)
+
 app = Flask(__name__)
 
 NSE_EQUITY_CSV = "https://archives.nseindia.com/content/equities/EQUITY_L.csv"
+NSE_EQUITY_CSV_ALT = "https://archives.nseindia.com/content/historical/EQUITIES/2024/JAN/cm11JAN24.csv"
 NIFTY_50_CSV = "https://archives.nseindia.com/content/indices/ind_nifty50list.csv"
 NIFTY_100_CSV = "https://archives.nseindia.com/content/indices/ind_nifty100list.csv"
+
+FALLBACK_NSE_SYMBOLS = [
+    "20MICRONS", "21STCentury", "3MINDIA", "AARTIDRUGS", "AARTIIND", "ABB", "ABBOTINDIA",
+    "ABCAPITAL", "ABFRL", "ACC", "ADANIENT", "ADANIPORTS", "ALKEM", "AMARAJABAT", "AMBUJACEM",
+    "ANGELONE", "APLAPOLLO", "APOLLOHOSP", "APOLLOTYRE", "ASHOKLEY", "ASIANPAINT", "ASTRAL",
+    "AUBANK", "AUROPHARMA", "AXISBANK", "BAJAJ-AUTO", "BAJAJFINSV", "BAJFINANCE", "BALKRISIND",
+    "BALRAMCHIN", "BANDHANBNK", "BANKBARODA", "BANKINDIA", "BATAINDIA", "BEL", "BHARATFORG",
+    "BHARTIARTL", "BIOCON", "BOSCHLTD", "BPCL", "BRITANNIA", "BSOFT", "CANBK", "CANFINHOME",
+    "CHAMBLFERT", "CHOLAFIN", "CIPLA", "COALINDIA", "COFORGE", "COLPAL", "CONCOR", "COROMANDEL",
+    "CROMPTON", "CUB", "CUMMINSIND", "DABUR", "DALBHARAT", "DEEPAKNTR", "DIVISLAB", "DIXON",
+    "DLF", "DRREDDY", "EICHERMOT", "ELGIEQUIP", "EMAMILTD", "ENDURANCE", "ESCORTS", "EXIDEIND",
+    "FEDERALBNK", "GAIL", "GLENMARK", "GMRINFRA", "GODREJAGRO", "GODREJCP", "GODREJIND",
+    "GOODYEAR", "GRASIM", "GSFC", "GSPL", "HAL", "HAVELLS", "HCLTECH", "HDFC", "HDFCBANK",
+    "HDFCLIFE", "HEROMOTOCO", "HINDALCO", "HINDCOPPER", "HINDUNILVR", "ICICIBANK", "IDFCFIRSTB",
+    "IEXINDIA", "INDHOTEL", "INDIACEM", "INDIAMART", "INDIANB", "INDUSTINB", "INFY", "IOC",
+    "IPCALAB", "IRCTC", "ITC", "JUBLFOOD", "KAJARIACER", "KANSAINER", "KOTAKBANK", "LALPATHLAB",
+    "LAOPALA", "LICHSGFIN", "LT", "LTF", "LUPIN", "M&M", "M&MFIN", "MANAPPURAM", "MARICO",
+    "MARUTI", "MCX", "METROPOLIS", "MFSL", "MGL", "MIDHANI", "MMTC", "MOTHERSON", "MPHASIS",
+    "MRF", "MUTHOOTFIN", "NAM-INDIA", "NATIONALUM", "NAVINFLUOR", "NESTLEIND", "NEWGEN",
+    "NTPC", "OBEROIRLTY", "OFSS", "OIL", "ONGC", "PAGEIND", "PERSISTENT", "PETRONET",
+    "PFIZER", "PIDILITIND", "PIIND", "PNB", "POLYCAB", "POWERGRID", "PVRINOX", "RAMCOCEM",
+    "RBLBANK", "RECLTD", "RELIANCE", "RENUKA", "SAIL", "SBICARD", "SBILIFE", "SBIN",
+    "SHREECEM", "SHRIRAMFIN", "SIEMENS", "SONACOMS", "SRF", "SUNPHARMA", "SUNTV",
+    "TATACHEM", "TATACOMM", "TATAELXSI", "TATAMOTORS", "TATAPOWER", "TATASTEEL",
+    "TCS", "TECHM", "TORNTPHARM", "TRENT", "TRIDENT", "TVSMOTOR", "UBL", "UCO",
+    "UJJIVANSFB", "ULTRACEMCO", "UNIONBANK", "UPL", "VEDL", "VOLTAS", "WHIRLPOOL",
+    "WIPRO", "ZEEL", "ZYDUSLIFE"
+]
 STOCKS_CACHE_FILE = "stocks_cache.json"
 DATA_CACHE_FILE = "data_cache.json"
 NIFTY50_CACHE_FILE = "nifty50_cache.json"
@@ -42,10 +80,12 @@ def get_all_nse_symbols():
             with open(STOCKS_CACHE_FILE) as f:
                 data = json.load(f)
                 if isinstance(data, list) and len(data) > 100:
+                    log.info(f"Loaded {len(data)} symbols from local cache")
                     return data
-        except:
-            pass
+        except Exception as e:
+            log.warning(f"Failed to read stocks cache: {e}")
 
+    log.info("Attempting to fetch NSE equity list from archives...")
     try:
         resp = requests.get(NSE_EQUITY_CSV, headers=NSE_HEADERS, timeout=20)
         if resp.status_code == 200:
@@ -57,13 +97,19 @@ def get_all_nse_symbols():
                 if symbol and symbol != 'nan':
                     stocks.append({'symbol': symbol, 'name': name})
             if stocks:
+                log.info(f"Fetched {len(stocks)} symbols from NSE archives")
                 with open(STOCKS_CACHE_FILE, 'w') as f:
                     json.dump(stocks, f)
                 return stocks
+        log.warning(f"NSE archives returned status {resp.status_code}")
     except Exception as e:
-        print(f"NSE CSV fetch failed: {e}")
+        log.warning(f"NSE CSV fetch failed: {e}")
 
-    return []
+    log.info("Using fallback NSE stock list")
+    stocks = [{'symbol': s, 'name': s} for s in FALLBACK_NSE_SYMBOLS]
+    with open(STOCKS_CACHE_FILE, 'w') as f:
+        json.dump(stocks, f)
+    return stocks
 
 
 def fetch_index_symbols(index_name, csv_url, cache_file):
@@ -72,10 +118,12 @@ def fetch_index_symbols(index_name, csv_url, cache_file):
             with open(cache_file) as f:
                 data = json.load(f)
                 if isinstance(data, list) and len(data) > 0:
+                    log.info(f"Loaded {len(data)} {index_name} symbols from cache")
                     return set(data)
-        except:
-            pass
+        except Exception as e:
+            log.warning(f"Failed to read {index_name} cache: {e}")
 
+    log.info(f"Fetching {index_name} symbols from NSE...")
     try:
         resp = requests.get(csv_url, headers=NSE_HEADERS, timeout=20)
         if resp.status_code == 200:
@@ -86,11 +134,13 @@ def fetch_index_symbols(index_name, csv_url, cache_file):
                 if symbol and symbol != 'nan':
                     symbols.append(symbol)
             if symbols:
+                log.info(f"Fetched {len(symbols)} {index_name} symbols")
                 with open(cache_file, 'w') as f:
                     json.dump(symbols, f)
                 return set(symbols)
+        log.warning(f"{index_name} CSV returned status {resp.status_code}")
     except Exception as e:
-        print(f"{index_name} CSV fetch failed: {e}")
+        log.warning(f"{index_name} CSV fetch failed: {e}")
 
     return set()
 
@@ -385,7 +435,7 @@ def fetch_yahoo_stock(symbol):
     url = f'https://query1.finance.yahoo.com/v8/finance/chart/{symbol}.NS'
     params = {'interval': '1d', 'range': '1y'}
     try:
-        r = requests.get(url, params=params, headers=YAHOO_HEADERS, timeout=10)
+        r = requests.get(url, params=params, headers=YAHOO_HEADERS, timeout=15)
         if r.status_code == 200:
             data = r.json()
             result = data['chart']['result'][0]
@@ -404,8 +454,8 @@ def fetch_yahoo_stock(symbol):
                     'drawdown': round(dd, 2),
                     'volume': int(vol) if vol else 0,
                 }
-    except:
-        pass
+    except Exception as e:
+        log.debug(f"Yahoo fetch failed for {symbol}: {e}")
     return None
 
 
@@ -498,106 +548,139 @@ _suggestions_lock = threading.Lock()
 def background_suggestions():
     global _suggestions_cache, _suggestions_status, _suggestions_total, _suggestions_done
 
-    cached = load_suggestions_cache()
-    if cached is not None:
-        with _suggestions_lock:
-            _suggestions_cache = cached
-            _suggestions_status = "done"
-        return
-
-    with _suggestions_lock:
-        _suggestions_status = "computing"
-
-    symbols_data = []
-    with _lock:
-        for s in _data_cache:
-            symbols_data.append({'symbol': s['symbol'], 'name': s['name'],
-                                 'drawdown': s['drawdown'], 'indices': s.get('indices', [])})
-
-    if not symbols_data:
-        with _suggestions_lock:
-            _suggestions_status = "idle"
-        return
-
-    with _suggestions_lock:
-        _suggestions_total = len(symbols_data)
-        _suggestions_done = 0
-
-    results = []
-    with ThreadPoolExecutor(max_workers=30) as ex:
-        futures = {ex.submit(fetch_stock_with_ohlcv, s['symbol']): s for s in symbols_data}
-        for f in as_completed(futures):
-            stock_info = futures[f]
+    try:
+        cached = load_suggestions_cache()
+        if cached is not None:
             with _suggestions_lock:
-                _suggestions_done += 1
-            data = f.result()
-            if data and len(data.get('closes', [])) >= 20:
-                score_result = compute_buy_score(data)
-                hist_metrics = compute_historical_metrics(data['closes'], data.get('highs', []))
-                results.append({
-                    'symbol': data['symbol'],
-                    'name': data['name'],
-                    'currentPrice': data['currentPrice'],
-                    'drawdown': data['drawdown'],
-                    'volume': data['volume'],
-                    'indices': stock_info.get('indices', []),
-                    'score': score_result['score'],
-                    'label': score_result['label'],
-                    'signals': score_result['signals'],
-                    'history': hist_metrics,
-                })
+                _suggestions_cache = cached
+                _suggestions_status = "done"
+            log.info(f"Loaded {len(cached)} suggestions from cache")
+            return
 
-    results.sort(key=lambda x: x['score'], reverse=True)
+        with _suggestions_lock:
+            _suggestions_status = "computing"
 
-    with _suggestions_lock:
-        _suggestions_cache = results
-        _suggestions_status = "done"
+        symbols_data = []
+        with _lock:
+            for s in _data_cache:
+                symbols_data.append({'symbol': s['symbol'], 'name': s['name'],
+                                     'drawdown': s['drawdown'], 'indices': s.get('indices', [])})
 
-    save_suggestions_cache(results)
-    print(f"Suggestions complete: {len(results)} stocks scored")
+        if not symbols_data:
+            log.warning("No stock data available for suggestions")
+            with _suggestions_lock:
+                _suggestions_status = "idle"
+            return
+
+        with _suggestions_lock:
+            _suggestions_total = len(symbols_data)
+            _suggestions_done = 0
+
+        log.info(f"Computing suggestions for {len(symbols_data)} stocks...")
+
+        results = []
+        with ThreadPoolExecutor(max_workers=30) as ex:
+            futures = {ex.submit(fetch_stock_with_ohlcv, s['symbol']): s for s in symbols_data}
+            for f in as_completed(futures):
+                stock_info = futures[f]
+                with _suggestions_lock:
+                    _suggestions_done += 1
+                data = f.result()
+                if data and len(data.get('closes', [])) >= 20:
+                    score_result = compute_buy_score(data)
+                    hist_metrics = compute_historical_metrics(data['closes'], data.get('highs', []))
+                    results.append({
+                        'symbol': data['symbol'],
+                        'name': data['name'],
+                        'currentPrice': data['currentPrice'],
+                        'drawdown': data['drawdown'],
+                        'volume': data['volume'],
+                        'indices': stock_info.get('indices', []),
+                        'score': score_result['score'],
+                        'label': score_result['label'],
+                        'signals': score_result['signals'],
+                        'history': hist_metrics,
+                    })
+
+        results.sort(key=lambda x: x['score'], reverse=True)
+
+        with _suggestions_lock:
+            _suggestions_cache = results
+            _suggestions_status = "done"
+
+        save_suggestions_cache(results)
+        log.info(f"Suggestions complete: {len(results)} stocks scored")
+
+    except Exception as e:
+        log.error(f"background_suggestions CRASHED: {e}", exc_info=True)
+        with _suggestions_lock:
+            _suggestions_status = "done"
 
 
 def background_refresh():
     global _data_cache, _data_status, _data_total, _data_done
 
-    with _lock:
-        _data_status = "fetching"
+    try:
+        with _lock:
+            _data_status = "fetching"
 
-    stocks = get_all_nse_symbols()
-    symbols = [s['symbol'] for s in stocks]
+        log.info("Starting background refresh...")
 
-    nifty50 = get_nifty50_symbols()
-    nifty100 = get_nifty100_symbols()
+        stocks = get_all_nse_symbols()
+        symbols = [s['symbol'] for s in stocks]
+        log.info(f"Got {len(symbols)} NSE symbols to scan")
 
-    with _lock:
-        _data_total = len(symbols)
-        _data_done = 0
-
-    results = []
-    with ThreadPoolExecutor(max_workers=50) as ex:
-        futures = {ex.submit(fetch_yahoo_stock, s): s for s in symbols}
-        for f in as_completed(futures):
-            r = f.result()
+        if not symbols:
+            log.error("No symbols to scan! Check NSE connectivity.")
             with _lock:
-                _data_done += 1
-            if r:
-                indices = []
-                if r['symbol'] in nifty50:
-                    indices.append('NIFTY 50')
-                if r['symbol'] in nifty100:
-                    indices.append('NIFTY 100')
-                r['indices'] = indices
-                results.append(r)
+                _data_status = "done"
+            return
 
-    results = [s for s in results if s.get('drawdown', 0) >= 25]
-    results.sort(key=lambda x: x['drawdown'], reverse=True)
+        nifty50 = get_nifty50_symbols()
+        nifty100 = get_nifty100_symbols()
+        log.info(f"Loaded index data: NIFTY50={len(nifty50)}, NIFTY100={len(nifty100)}")
 
-    with _lock:
-        _data_cache = results
-        _data_status = "done"
+        with _lock:
+            _data_total = len(symbols)
+            _data_done = 0
 
-    save_data_cache(results)
-    print(f"Refresh complete: {len(results)} stocks with >=25% drawdown from {len(symbols)} total")
+        results = []
+        failed_count = 0
+        with ThreadPoolExecutor(max_workers=50) as ex:
+            futures = {ex.submit(fetch_yahoo_stock, s): s for s in symbols}
+            for f in as_completed(futures):
+                r = f.result()
+                with _lock:
+                    _data_done += 1
+                if r:
+                    indices = []
+                    if r['symbol'] in nifty50:
+                        indices.append('NIFTY 50')
+                    if r['symbol'] in nifty100:
+                        indices.append('NIFTY 100')
+                    r['indices'] = indices
+                    results.append(r)
+                else:
+                    failed_count += 1
+
+                done = _data_done
+                if done % 50 == 0 or done == _data_total:
+                    log.info(f"Progress: {done}/{_data_total} scanned, {len(results)} matched, {failed_count} failed")
+
+        results = [s for s in results if s.get('drawdown', 0) >= 25]
+        results.sort(key=lambda x: x['drawdown'], reverse=True)
+
+        with _lock:
+            _data_cache = results
+            _data_status = "done"
+
+        save_data_cache(results)
+        log.info(f"Refresh complete: {len(results)} stocks with >=25% drawdown from {len(symbols)} total (Yahoo failures: {failed_count})")
+
+    except Exception as e:
+        log.error(f"background_refresh CRASHED: {e}", exc_info=True)
+        with _lock:
+            _data_status = "done"
 
 
 @app.route('/')
@@ -613,11 +696,15 @@ def api_stocks():
         done = _data_done
 
     if status == "done":
+        if not _data_cache:
+            log.info("Status is done but cache is empty, triggering refresh")
+            threading.Thread(target=background_refresh, daemon=True).start()
+            return jsonify({'status': 'loading', 'total': 0, 'done': 0, 'percent': 0}), 202
         return jsonify(_data_cache)
 
-    if status == "idle" or status == "done":
+    if status == "idle":
+        log.info("Status is idle, triggering background refresh")
         threading.Thread(target=background_refresh, daemon=True).start()
-        return jsonify([]), 202
 
     return jsonify({
         'status': 'loading',
@@ -737,8 +824,9 @@ def api_suggestions():
             'total': len(_suggestions_cache),
         })
 
-    if status == "idle" or status == "done":
+    if status == "idle":
         if _data_status == "done":
+            log.info("Triggering background suggestions computation")
             threading.Thread(target=background_suggestions, daemon=True).start()
             return jsonify({'status': 'computing', 'done': 0, 'total': 0}), 202
         return jsonify({'status': 'waiting', 'message': 'Stock data not ready'}), 202
@@ -751,8 +839,12 @@ def api_suggestions():
     }), 202
 
 
+log.info("=== Starting Deep Pullback Terminal ===")
 load_data_cache()
-if not _data_cache:
+if _data_cache:
+    log.info(f"Loaded {len(_data_cache)} stocks from cache")
+else:
+    log.info("No cached data, starting background refresh...")
     threading.Thread(target=background_refresh, daemon=True).start()
 
 if __name__ == '__main__':
