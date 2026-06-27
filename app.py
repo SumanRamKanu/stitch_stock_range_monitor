@@ -21,6 +21,15 @@ logging.basicConfig(
 logging.getLogger('urllib3').setLevel(logging.WARNING)
 log = logging.getLogger(__name__)
 
+def safe_log(level, msg, *args, **kwargs):
+    try:
+        getattr(log, level)(msg, *args, **kwargs)
+    except Exception:
+        try:
+            print(msg % args if args else msg, flush=True)
+        except Exception:
+            pass
+
 app = Flask(__name__)
 
 NSE_EQUITY_CSV = "https://archives.nseindia.com/content/equities/EQUITY_L.csv"
@@ -131,7 +140,7 @@ def get_all_nse_symbols():
         try:
             with open(STOCKS_CACHE_FILE) as f:
                 data = json.load(f)
-                if isinstance(data, list) and len(data) > 100:
+                if isinstance(data, list) and len(data) > 50:
                     log.info(f"Loaded {len(data)} symbols from local cache")
                     return data
         except Exception as e:
@@ -158,13 +167,13 @@ def get_all_nse_symbols():
                 return stocks
         log.warning(f"NSE archives returned status {resp.status_code}")
     except requests.exceptions.Timeout:
-        log.warning("NSE archives timed out, using fallback list")
+        log.warning("NSE archives timed out")
     except requests.exceptions.ConnectionError:
-        log.warning("NSE archives connection failed, using fallback list")
+        log.warning("NSE archives connection failed")
     except Exception as e:
         log.warning(f"NSE CSV fetch failed: {e}")
 
-    log.info("Using fallback NSE stock list")
+    log.info("Using fallback NSE stock list (%d symbols)", len(FALLBACK_NSE_SYMBOLS))
     stocks = [{'symbol': s, 'name': s} for s in FALLBACK_NSE_SYMBOLS]
     try:
         with open(STOCKS_CACHE_FILE, 'w') as f:
@@ -722,25 +731,38 @@ def background_refresh():
         with _lock:
             _data_status = "fetching"
 
-        log.info("Starting background refresh...")
+        safe_log("info", "Starting background refresh...")
 
         stocks = get_all_nse_symbols()
         symbols = [s['symbol'] for s in stocks]
-        log.info(f"Got {len(symbols)} NSE symbols to scan")
+        safe_log("info", f"Got {len(symbols)} NSE symbols to scan")
 
         if not symbols:
-            log.error("No symbols to scan! Using fallback list.")
-            stocks = [{'symbol': s, 'name': s} for s in FALLBACK_NSE_SYMBOLS]
-            symbols = [s['symbol'] for s in stocks]
+            safe_log("error", "No symbols from cache, using fallback")
+            symbols = list(FALLBACK_NSE_SYMBOLS)
 
         with _lock:
             _data_total = len(symbols)
             _data_done = 0
-        log.info(f"Total symbols to scan: {_data_total}")
+        safe_log("info", f"Total symbols to scan: {_data_total}")
 
-        nifty50 = get_nifty50_symbols()
-        nifty100 = get_nifty100_symbols()
-        log.info(f"Loaded index data: NIFTY50={len(nifty50)}, NIFTY100={len(nifty100)}")
+        nifty50 = set()
+        nifty100 = set()
+        try:
+            nifty50 = get_nifty50_symbols()
+            safe_log("info", f"Loaded {len(nifty50)} NIFTY50 symbols")
+        except Exception as e:
+            safe_log("warning", f"NIFTY50 fetch failed: {e}, using fallback")
+            nifty50 = set(FALLBACK_NIFTY50)
+
+        try:
+            nifty100 = get_nifty100_symbols()
+            safe_log("info", f"Loaded {len(nifty100)} NIFTY100 symbols")
+        except Exception as e:
+            safe_log("warning", f"NIFTY100 fetch failed: {e}, using fallback")
+            nifty100 = set(FALLBACK_NIFTY100)
+
+        safe_log("info", f"Index data: NIFTY50={len(nifty50)}, NIFTY100={len(nifty100)}")
 
         results = []
         failed_count = 0
@@ -766,7 +788,7 @@ def background_refresh():
 
                 done = _data_done
                 if done % 100 == 0 or done == _data_total:
-                    log.info(f"Progress: {done}/{_data_total} scanned, {len(results)} matched, {failed_count} failed")
+                    safe_log("info", f"Progress: {done}/{_data_total} scanned, {len(results)} matched, {failed_count} failed")
 
         results = [s for s in results if s.get('drawdown', 0) >= 25]
         results.sort(key=lambda x: x['drawdown'], reverse=True)
@@ -776,10 +798,15 @@ def background_refresh():
             _data_status = "done"
 
         save_data_cache(results)
-        log.info(f"Refresh complete: {len(results)} stocks with >=25% drawdown from {len(symbols)} total (Yahoo failures: {failed_count})")
+        safe_log("info", f"Refresh complete: {len(results)} stocks with >=25% drawdown from {len(symbols)} total (Yahoo failures: {failed_count})")
 
     except Exception as e:
-        log.error(f"background_refresh CRASHED: {e}", exc_info=True)
+        safe_log("error", f"background_refresh CRASHED: {e}")
+        import traceback
+        try:
+            traceback.print_exc()
+        except Exception:
+            pass
         with _lock:
             _data_status = "done"
 
@@ -798,13 +825,13 @@ def api_stocks():
 
     if status == "done":
         if not _data_cache:
-            log.info("Status is done but cache is empty, triggering refresh")
+            safe_log("info", "Status is done but cache is empty, triggering refresh")
             threading.Thread(target=background_refresh, daemon=True).start()
             return jsonify({'status': 'loading', 'total': 0, 'done': 0, 'percent': 0}), 202
         return jsonify(_data_cache)
 
     if status == "idle":
-        log.info("Status is idle, triggering background refresh")
+        safe_log("info", "Status is idle, triggering background refresh")
         threading.Thread(target=background_refresh, daemon=True).start()
 
     return jsonify({
