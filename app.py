@@ -2,7 +2,6 @@ import os
 import sys
 import json
 import time
-import math
 import logging
 import threading
 import requests
@@ -72,8 +71,7 @@ FALLBACK_NIFTY50 = [
     "M&M", "MARUTI", "NESTLEIND", "NTPC", "ONGC",
     "POWERGRID", "RELIANCE", "SBIN", "SUNPHARMA", "TATACONSUM",
     "TATAMOTORS", "TATASTEEL", "TCS", "TECHM", "TITAN",
-    "ULTRACEMCO", "WIPRO", "BAJAJFINSV", "HINDUNILVR", "ITC",
-    "SBILIFE", "HDFCLIFE", "TRENT", "ADANIENT", "BEL",
+    "ULTRACEMCO", "WIPRO", "SBILIFE", "TRENT", "ADANIENT", "BEL",
 ]
 
 FALLBACK_NIFTY100 = FALLBACK_NIFTY50 + [
@@ -95,7 +93,7 @@ FALLBACK_NIFTY100 = FALLBACK_NIFTY50 + [
     "SHRIRAMFIN", "SIEMENS", "SRF", "SUNTV", "TATACHEM",
     "TATACOMM", "TATAELXSI", "TATAPOWER", "TORNTPHARM", "TRIDENT",
     "TVSMOTOR", "UBL", "UCO", "UPL", "VEDL",
-    "VOLTAS", "ZEEL", "ZYDUSLIFE", "ALKEM", "AUROPHARMA",
+    "VOLTAS", "ZEEL", "ZYDUSLIFE"
 ]
 
 STOCKS_CACHE_FILE = "stocks_cache.json"
@@ -330,13 +328,16 @@ def fetch_stock_with_ohlcv(symbol):
 
 
 def load_data_cache():
-    global _data_cache
+    global _data_cache, _data_status, _data_total, _data_done
     if os.path.exists(DATA_CACHE_FILE):
         try:
             with open(DATA_CACHE_FILE) as f:
                 data = json.load(f)
                 if isinstance(data, list) and len(data) > 0:
                     _data_cache = data
+                    _data_status = "done"
+                    _data_total = len(data)
+                    _data_done = len(data)
                     return True
         except Exception:
             pass
@@ -801,13 +802,14 @@ def api_stocks():
         status = _data_status
         total = _data_total
         done = _data_done
+        cache = list(_data_cache)
 
     if status == "done":
-        if not _data_cache:
+        if not cache:
             safe_log("info", "Status is done but cache is empty, triggering refresh")
             threading.Thread(target=background_refresh, daemon=True).start()
             return jsonify({'status': 'loading', 'total': 0, 'done': 0, 'percent': 0}), 202
-        return jsonify(_data_cache)
+        return jsonify(cache)
 
     if status == "idle":
         safe_log("info", "Status is idle, triggering background refresh")
@@ -858,7 +860,10 @@ def api_stock_detail(symbol):
             return jsonify({'error': 'Stock not found'}), 404
 
         data = r.json()
-        result = data['chart']['result'][0]
+        result_list = data.get('chart', {}).get('result', [])
+        if not result_list:
+            return jsonify({'error': 'Stock not found'}), 404
+        result = result_list[0]
         meta = result['meta']
         timestamps = result.get('timestamp', [])
         quotes = result['indicators']['quote'][0]
